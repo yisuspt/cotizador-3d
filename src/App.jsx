@@ -23,11 +23,16 @@ const DEFAULT_MATERIALS = [
 // crea una cuenta, crea un formulario nuevo, y pega aquí la URL que te den
 // (algo como "https://formspree.io/f/xxxxabcd"). Mientras diga "TU-FORM-ID",
 // el botón de sugerencias avisa que falta configurarlo.
-const FEEDBACK_ENDPOINT = "https://formspree.io/f/mzebabjb";
+const FEEDBACK_ENDPOINT = "https://formspree.io/f/TU-FORM-ID";
 
 const DEFAULT_RATES = {
   currency: "MXN",
   businessName: "",
+  companyAddress: "",
+  folioPrefix: "COT",
+  nextFolioNumber: 1001,
+  ivaEnabled: false,
+  ivaPercent: 16,
   wastePercent: 8,
   electricityCostPerKwh: 2.4,
   maintenancePerHour: 1.5,
@@ -48,6 +53,10 @@ function makeDefaultComponent(printerId, materialId, index) {
     name: index ? `Pieza ${index}` : "Pieza 1",
     printerId: printerId || DEFAULT_PRINTERS[0].id,
     materialId: materialId || DEFAULT_MATERIALS[0].id,
+    quantity: 1,
+    color: "",
+    layerHeight: 0.2,
+    infillPercent: 15,
     weightGrams: 50,
     printHours: 4,
     postProcessHours: 0.5,
@@ -56,7 +65,10 @@ function makeDefaultComponent(printerId, materialId, index) {
 }
 
 const DEFAULT_ORDER = {
-  orderName: "",
+  clientName: "",
+  clientLocation: "",
+  discount: 0,
+  folio: "",
   components: [makeDefaultComponent(null, null, 1)],
   extras: [],
 };
@@ -318,8 +330,20 @@ function ComponentCard({ component, index, printers, materials, currency, onChan
         ))}
       </div>
 
+      <div className="piece-fields-tech">
+        <NumField label="Cantidad" value={component.quantity} onChange={(v) => onChange({ ...component, quantity: v })} min={1} step={1} hint="Piezas idénticas en este renglón" />
+        <label className="field">
+          <span className="field-label">Color</span>
+          <div className="field-input-wrap">
+            <TextField value={component.color} onChange={(v) => onChange({ ...component, color: v })} placeholder="Ej. Multicolor, Rojo" />
+          </div>
+        </label>
+        <NumField label="Resolución" value={component.layerHeight} onChange={(v) => onChange({ ...component, layerHeight: v })} suffix="mm" step={0.05} />
+        <NumField label="Relleno" value={component.infillPercent} onChange={(v) => onChange({ ...component, infillPercent: v })} suffix="%" step={5} />
+      </div>
+
       <div className="piece-fields">
-        <NumField label="Peso" value={component.weightGrams} onChange={(v) => onChange({ ...component, weightGrams: v })} suffix="g" step={1} />
+        <NumField label="Peso (por pieza)" value={component.weightGrams} onChange={(v) => onChange({ ...component, weightGrams: v })} suffix="g" step={1} />
         <TimeField label="Tiempo de impresión" totalHours={component.printHours} onChange={(v) => onChange({ ...component, printHours: v })} />
         <TimeField label="Post-proceso" totalHours={component.postProcessHours} onChange={(v) => onChange({ ...component, postProcessHours: v })} />
         <NumField label="Extras fijos" value={component.extraCosts} onChange={(v) => onChange({ ...component, extraCosts: v })} suffix={currency} step={5} />
@@ -342,21 +366,56 @@ function applyMargin(cost, rates) {
 function computeComponent(component, rates) {
   const printer = rates.printers.find((p) => p.id === component.printerId) || rates.printers[0];
   const material = rates.materials.find((m) => m.id === component.materialId) || rates.materials[0];
-  const weight = n(component.weightGrams);
-  const printHours = n(component.printHours);
-  const materialCost = (weight / 1000) * n(material.pricePerKg) * (1 + n(rates.wastePercent) / 100);
-  const energyCost = (n(printer.watts) / 1000) * printHours * n(rates.electricityCostPerKwh);
-  const depreciationCost = n(printer.lifespanHours) > 0 ? (n(printer.price) / n(printer.lifespanHours)) * printHours : 0;
-  const maintenanceCost = n(rates.maintenancePerHour) * printHours;
-  const laborCost = n(rates.laborRatePerHour) * n(component.postProcessHours);
-  const extras = n(component.extraCosts);
-  const subtotal = materialCost + energyCost + depreciationCost + maintenanceCost + laborCost + extras;
+  const qty = Math.max(1, Math.round(n(component.quantity) || 1));
+  const weightUnit = n(component.weightGrams);
+  const printHoursUnit = n(component.printHours);
+  const materialCostUnit = (weightUnit / 1000) * n(material.pricePerKg) * (1 + n(rates.wastePercent) / 100);
+  const energyCostUnit = (n(printer.watts) / 1000) * printHoursUnit * n(rates.electricityCostPerKwh);
+  const depreciationCostUnit = n(printer.lifespanHours) > 0 ? (n(printer.price) / n(printer.lifespanHours)) * printHoursUnit : 0;
+  const maintenanceCostUnit = n(rates.maintenancePerHour) * printHoursUnit;
+  const laborCostUnit = n(rates.laborRatePerHour) * n(component.postProcessHours);
+  const extrasUnit = n(component.extraCosts);
+  const unitSubtotal = materialCostUnit + energyCostUnit + depreciationCostUnit + maintenanceCostUnit + laborCostUnit + extrasUnit;
+  const subtotal = unitSubtotal * qty;
   const { profit, total } = applyMargin(subtotal, rates);
+  const unitPrice = total / qty;
 
-  return { printer, material, weight, printHours, materialCost, energyCost, depreciationCost, maintenanceCost, laborCost, extras, subtotal, profit, total };
+  return {
+    printer,
+    material,
+    qty,
+    weight: weightUnit * qty,
+    printHours: printHoursUnit * qty,
+    materialCost: materialCostUnit * qty,
+    energyCost: energyCostUnit * qty,
+    depreciationCost: depreciationCostUnit * qty,
+    maintenanceCost: maintenanceCostUnit * qty,
+    laborCost: laborCostUnit * qty,
+    extras: extrasUnit * qty,
+    subtotal,
+    profit,
+    total,
+    unitPrice,
+  };
 }
 
-function PrintableQuote({ businessName, orderName, results, orderExtrasSubtotal, orderExtrasClientPrice, total, currency }) {
+function PrintableQuote({
+  businessName,
+  companyAddress,
+  folio,
+  clientName,
+  clientLocation,
+  results,
+  orderExtras,
+  orderExtrasClientPrice,
+  subtotal,
+  discountAmount,
+  ivaEnabled,
+  ivaPercent,
+  ivaAmount,
+  total,
+  currency,
+}) {
   const today = new Date().toLocaleDateString("es-MX", { day: "2-digit", month: "long", year: "numeric" });
   return (
     <div className="print-quote" id="print-quote-root">
@@ -373,7 +432,7 @@ function PrintableQuote({ businessName, orderName, results, orderExtrasSubtotal,
           background: #fff;
           color: #1A1A1A;
           font-family: 'IBM Plex Sans', sans-serif;
-          padding: 10mm 4mm;
+          padding: 0 4mm 10mm;
         }
         @media print {
           .app-ui { display: none !important; }
@@ -385,64 +444,121 @@ function PrintableQuote({ businessName, orderName, results, orderExtrasSubtotal,
           }
           @page { margin: 14mm; }
         }
-        .pq-header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #1A1A1A; padding-bottom: 14px; margin-bottom: 18px; }
-        .pq-business { font-family: 'Space Grotesk', sans-serif; font-size: 22px; font-weight: 700; }
-        .pq-meta { text-align: right; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #555; }
-        .pq-client { font-size: 14px; margin-bottom: 18px; color: #333; }
-        .pq-client b { color: #1A1A1A; }
+        .pq-topbar { height: 6px; background: #1a3aa8; margin: 0 -4mm 22px; }
+        .pq-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
+        .pq-business { font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 700; }
+        .pq-address { font-size: 11.5px; color: #666; margin-top: 2px; }
+        .pq-folio { font-family: 'IBM Plex Mono', monospace; font-size: 13px; font-weight: 700; color: #d6006e; }
+        .pq-title { font-family: 'Space Grotesk', sans-serif; font-size: 32px; font-weight: 700; color: #1a3aa8; margin: 18px 0 2px; }
+        .pq-date { font-size: 12.5px; color: #d6006e; font-weight: 600; margin-bottom: 18px; }
+        .pq-info-box { display: flex; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 20px; }
+        .pq-info-col { flex: 1; padding: 10px 14px; font-size: 12.5px; color: #333; }
+        .pq-info-col + .pq-info-col { border-left: 1px solid #ccc; }
+        .pq-info-label { font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: #1a3aa8; margin-bottom: 4px; display: block; }
         .pq-table { width: 100%; border-collapse: collapse; margin-bottom: 18px; }
-        .pq-table th { text-align: left; font-family: 'IBM Plex Sans', sans-serif; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.03em; color: #777; padding: 6px 8px; border-bottom: 1px solid #ccc; }
-        .pq-table td { font-size: 13.5px; padding: 10px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
-        .pq-table td:last-child, .pq-table th:last-child { text-align: right; font-family: 'IBM Plex Mono', monospace; white-space: nowrap; }
+        .pq-table th { text-align: left; font-family: 'IBM Plex Sans', sans-serif; font-size: 11px; font-weight: 700; color: #1a3aa8; padding: 6px 8px; border-bottom: 2px solid #1a3aa8; }
+        .pq-table td { font-size: 13px; padding: 10px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
+        .pq-table th:not(:first-child), .pq-table td:not(:first-child) { text-align: right; font-family: 'IBM Plex Mono', monospace; white-space: nowrap; }
         .pq-item-name { font-family: 'Space Grotesk', sans-serif; font-weight: 600; }
-        .pq-item-spec { font-size: 11.5px; color: #777; margin-top: 2px; }
-        .pq-total-row { display: flex; justify-content: space-between; align-items: baseline; padding-top: 10px; border-top: 2px solid #1A1A1A; }
-        .pq-total-label { font-family: 'Space Grotesk', sans-serif; font-size: 15px; }
-        .pq-total-value { font-family: 'Space Grotesk', sans-serif; font-size: 26px; font-weight: 700; }
-        .pq-footer { margin-top: 28px; font-size: 11.5px; color: #999; text-align: center; }
+        .pq-item-spec { font-size: 11px; color: #777; margin-top: 2px; font-family: 'IBM Plex Sans', sans-serif; }
+        .pq-totals { margin-left: auto; width: 260px; }
+        .pq-totals-row { display: flex; justify-content: space-between; font-size: 13px; padding: 5px 0; color: #333; }
+        .pq-totals-row.discount { color: #b00020; }
+        .pq-total-final { display: flex; justify-content: space-between; align-items: baseline; padding-top: 10px; margin-top: 6px; border-top: 2px solid #1a3aa8; }
+        .pq-total-final-label { font-family: 'Space Grotesk', sans-serif; font-size: 14px; }
+        .pq-total-final-value { font-family: 'Space Grotesk', sans-serif; font-size: 26px; font-weight: 700; color: #d6006e; }
       `}</style>
 
+      <div className="pq-topbar" />
+
       <div className="pq-header">
-        <div className="pq-business">{businessName || "Cotización"}</div>
-        <div className="pq-meta">Cotización<br />{today}</div>
+        <div>
+          <div className="pq-business">{businessName || "Cotización"}</div>
+          {companyAddress && <div className="pq-address">{companyAddress}</div>}
+        </div>
+        <div className="pq-folio">{folio}</div>
       </div>
 
-      {orderName && <div className="pq-client">Para: <b>{orderName}</b></div>}
+      <div className="pq-title">Cotización</div>
+      <div className="pq-date">Fecha: {today}</div>
+
+      <div className="pq-info-box">
+        <div className="pq-info-col">
+          <span className="pq-info-label">Datos del cliente</span>
+          <div>{clientName || "—"}</div>
+          {clientLocation && <div>{clientLocation}</div>}
+        </div>
+        <div className="pq-info-col">
+          <span className="pq-info-label">Cotizado por</span>
+          <div>{businessName || "—"}</div>
+          {companyAddress && <div>{companyAddress}</div>}
+        </div>
+      </div>
 
       <table className="pq-table">
         <thead>
           <tr>
-            <th>Pieza</th>
-            <th>Precio</th>
+            <th>Descripción</th>
+            <th>Cantidad</th>
+            <th>Precio unitario</th>
+            <th>Precio total</th>
           </tr>
         </thead>
         <tbody>
-          {results.map((r) => (
-            <tr key={r.component.id}>
+          {results.map((r) => {
+            const specBits = [
+              r.calc.material.name,
+              r.component.color || null,
+              `capa ${round2(n(r.component.layerHeight))}mm`,
+              `relleno ${round2(n(r.component.infillPercent))}%`,
+            ].filter(Boolean);
+            return (
+              <tr key={r.component.id}>
+                <td>
+                  <div className="pq-item-name">{r.component.name || "Pieza"}</div>
+                  <div className="pq-item-spec">{specBits.join(" · ")}</div>
+                </td>
+                <td>{r.calc.qty}</td>
+                <td>{fmtMoney(r.calc.unitPrice, currency)}</td>
+                <td>{fmtMoney(r.calc.total, currency)}</td>
+              </tr>
+            );
+          })}
+          {(orderExtras || []).map((ex) => (
+            <tr key={ex.id}>
               <td>
-                <div className="pq-item-name">{r.component.name || "Pieza"}</div>
-                <div className="pq-item-spec">{r.calc.material.name} · {round2(r.calc.weight)} g · {fmtHM(r.calc.printHours)} de impresión</div>
+                <div className="pq-item-name">{ex.name || "Acabado"}</div>
               </td>
-              <td>{fmtMoney(r.calc.total, currency)}</td>
+              <td>1</td>
+              <td>—</td>
+              <td>{fmtMoney(ex.clientPrice, currency)}</td>
             </tr>
           ))}
-          {orderExtrasSubtotal > 0 && (
-            <tr>
-              <td>
-                <div className="pq-item-name">Acabados y empaque</div>
-              </td>
-              <td>{fmtMoney(orderExtrasClientPrice, currency)}</td>
-            </tr>
-          )}
         </tbody>
       </table>
 
-      <div className="pq-total-row">
-        <span className="pq-total-label">Total</span>
-        <span className="pq-total-value">{fmtMoney(total, currency)}</span>
+      <div className="pq-totals">
+        <div className="pq-totals-row">
+          <span>Subtotal</span>
+          <span>{fmtMoney(subtotal, currency)}</span>
+        </div>
+        {discountAmount > 0 && (
+          <div className="pq-totals-row discount">
+            <span>Descuento</span>
+            <span>-{fmtMoney(discountAmount, currency)}</span>
+          </div>
+        )}
+        {ivaEnabled && (
+          <div className="pq-totals-row">
+            <span>IVA ({ivaPercent}%)</span>
+            <span>{fmtMoney(ivaAmount, currency)}</span>
+          </div>
+        )}
+        <div className="pq-total-final">
+          <span className="pq-total-final-label">Total</span>
+          <span className="pq-total-final-value">{fmtMoney(total, currency)}</span>
+        </div>
       </div>
-
-      <div className="pq-footer">Cotización generada el {today}.</div>
     </div>
   );
 }
@@ -720,7 +836,9 @@ export default function CotizadorImpresion3D() {
     persistRates(next);
   };
 
-  const updateOrderName = (value) => setOrder((o) => ({ ...o, orderName: value }));
+  const updateClientName = (value) => setOrder((o) => ({ ...o, clientName: value }));
+  const updateClientLocation = (value) => setOrder((o) => ({ ...o, clientLocation: value }));
+  const updateDiscount = (value) => setOrder((o) => ({ ...o, discount: value === "" ? 0 : value }));
 
   const addOrderExtra = () =>
     setOrder((o) => ({ ...o, extras: [...(o.extras || []), { id: newId("e"), name: "", cost: 0 }] }));
@@ -765,6 +883,11 @@ export default function CotizadorImpresion3D() {
   const grandSubtotal = componentTotals.subtotal + orderExtrasSubtotal;
   const { profit: grandProfit, total: grandTotal } = applyMargin(grandSubtotal, rates);
   const { total: orderExtrasClientPrice } = applyMargin(orderExtrasSubtotal, rates);
+  const extrasForPrint = orderExtras.map((e) => ({
+    id: e.id,
+    name: e.name,
+    clientPrice: applyMargin(n(e.cost), rates).total,
+  }));
 
   const totals = { ...componentTotals, subtotal: grandSubtotal, profit: grandProfit, total: grandTotal };
 
@@ -772,28 +895,30 @@ export default function CotizadorImpresion3D() {
   const pricePerHour = totals.printHours > 0 ? totals.total / totals.printHours : 0;
   const effectiveMarginOnSale = totals.total > 0 ? (totals.profit / totals.total) * 100 : 0;
 
+  const discountAmount = Math.min(Math.max(0, n(order.discount)), totals.total);
+  const preTaxTotal = Math.max(0, totals.total - discountAmount);
+  const ivaAmount = rates.ivaEnabled ? preTaxTotal * (n(rates.ivaPercent) / 100) : 0;
+  const finalTotal = preTaxTotal + ivaAmount;
+  const folioPreview = `${rates.folioPrefix || "COT"}${rates.nextFolioNumber}`;
+
   const buildSummaryText = () => {
-    const name = order.orderName ? order.orderName : "Pedido de impresion 3D";
-    const lines = [`Cotizacion: ${name}`, ""];
+    const name = order.clientName ? order.clientName : "Cliente";
+    const lines = [`Cotizacion ${folioPreview} — ${name}`, ""];
+    if (order.clientLocation) lines.push(order.clientLocation, "");
     results.forEach((r) => {
-      lines.push(`${r.component.name} (${r.calc.printer.name}, ${r.calc.material.name}) - ${fmtMoney(r.calc.total, rates.currency)}`);
+      const qty = Math.max(1, Math.round(n(r.component.quantity) || 1));
+      lines.push(`${r.component.name} x${qty} (${r.calc.printer.name}, ${r.calc.material.name}) - ${fmtMoney(r.calc.total, rates.currency)}`);
     });
-    lines.push("");
-    lines.push(`Material: ${fmtMoney(totals.materialCost, rates.currency)}`);
-    lines.push(`Electricidad: ${fmtMoney(totals.energyCost, rates.currency)}`);
-    lines.push(`Uso de maquina: ${fmtMoney(totals.depreciationCost, rates.currency)}`);
-    lines.push(`Mantenimiento: ${fmtMoney(totals.maintenanceCost, rates.currency)}`);
-    lines.push(`Mano de obra: ${fmtMoney(totals.laborCost, rates.currency)}`);
-    lines.push(`Extras por pieza: ${fmtMoney(totals.extras, rates.currency)}`);
     if (orderExtras.length) {
       lines.push("");
       lines.push("Post-proceso y acabados:");
       orderExtras.forEach((e) => lines.push(`  ${e.name || "Sin nombre"}: ${fmtMoney(n(e.cost), rates.currency)}`));
     }
     lines.push("");
-    lines.push(`Subtotal: ${fmtMoney(totals.subtotal, rates.currency)}`);
-    lines.push(`Ganancia: ${fmtMoney(totals.profit, rates.currency)}`);
-    lines.push(`Precio total: ${fmtMoney(totals.total, rates.currency)}`);
+    lines.push(`Subtotal: ${fmtMoney(totals.total, rates.currency)}`);
+    if (discountAmount > 0) lines.push(`Descuento: -${fmtMoney(discountAmount, rates.currency)}`);
+    if (rates.ivaEnabled) lines.push(`IVA (${n(rates.ivaPercent)}%): ${fmtMoney(ivaAmount, rates.currency)}`);
+    lines.push(`Total: ${fmtMoney(finalTotal, rates.currency)}`);
     return lines.join("\n");
   };
 
@@ -809,8 +934,8 @@ export default function CotizadorImpresion3D() {
 
   const handlePrint = () => {
     try {
-      const safeName = (order.orderName || "cotizacion").trim().replace(/\s+/g, "-");
-      document.title = `Cotizacion-${safeName}`;
+      const safeName = (order.clientName || "cotizacion").trim().replace(/\s+/g, "-");
+      document.title = `${folioPreview}-${safeName}`;
     } catch {
       /* no-op */
     }
@@ -842,8 +967,8 @@ export default function CotizadorImpresion3D() {
         heightLeft -= pageHeight;
       }
 
-      const safeName = (order.orderName || "cotizacion").trim().replace(/\s+/g, "-") || "cotizacion";
-      pdf.save(`Cotizacion-${safeName}.pdf`);
+      const safeName = (order.clientName || "cotizacion").trim().replace(/\s+/g, "-") || "cotizacion";
+      pdf.save(`${folioPreview}-${safeName}.pdf`);
     } catch (e) {
       console.error("No se pudo generar el PDF", e);
     } finally {
@@ -852,16 +977,22 @@ export default function CotizadorImpresion3D() {
   };
 
   const handleSaveQuote = async () => {
+    const assignedFolio = folioPreview;
     const entry = {
       id: `q_${Date.now()}`,
-      name: order.orderName || "Sin nombre",
+      name: order.clientName || "Sin nombre",
+      folio: assignedFolio,
       timestamp: Date.now(),
       currency: rates.currency,
-      total: round2(totals.total),
-      order,
+      total: round2(finalTotal),
+      order: { ...order, folio: assignedFolio },
     };
     const next = [entry, ...history].slice(0, 40);
     setHistory(next);
+    setOrder((o) => ({ ...o, folio: assignedFolio }));
+    const nextRates = { ...rates, nextFolioNumber: n(rates.nextFolioNumber) + 1 };
+    setRates(nextRates);
+    persistRates(nextRates);
     try {
       const res = await storage.set("historial-cotizaciones", JSON.stringify(next), false);
       setSavedFlash(true);
@@ -888,7 +1019,14 @@ export default function CotizadorImpresion3D() {
   };
 
   const handleResetOrder = () =>
-    setOrder({ orderName: "", components: [makeDefaultComponent(rates.printers[0].id, rates.materials[0].id, 1)], extras: [] });
+    setOrder({
+      clientName: "",
+      clientLocation: "",
+      discount: 0,
+      folio: "",
+      components: [makeDefaultComponent(rates.printers[0].id, rates.materials[0].id, 1)],
+      extras: [],
+    });
 
   return (
     <>
@@ -984,6 +1122,15 @@ export default function CotizadorImpresion3D() {
         }
         .job-name::placeholder { color: var(--ink-dim); font-family: 'IBM Plex Sans', sans-serif; }
         .job-name:focus { outline: none; border-color: var(--accent-dim); }
+
+        .client-block { margin-bottom: 4px; }
+        .client-row { display: flex; gap: 10px; margin-bottom: 16px; }
+        .client-row .job-name-secondary { margin-bottom: 0; flex: 1; min-width: 0; }
+        .discount-input { flex-shrink: 0; width: 150px; }
+        @media (max-width: 480px) {
+          .client-row { flex-wrap: wrap; }
+          .discount-input { width: 100%; }
+        }
 
         .section {
           background: var(--panel);
@@ -1201,6 +1348,10 @@ export default function CotizadorImpresion3D() {
         @media (max-width: 380px) {
           .piece-fields { grid-template-columns: 1fr; }
         }
+        .piece-fields-tech { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 16px; margin-bottom: 12px; }
+        @media (max-width: 560px) {
+          .piece-fields-tech { grid-template-columns: 1fr 1fr; }
+        }
         .piece-printer-note { font-size: 11px; color: var(--ink-dim); margin-top: 8px; opacity: 0.8; }
 
         .add-piece-btn {
@@ -1276,11 +1427,27 @@ export default function CotizadorImpresion3D() {
           display: flex;
           justify-content: space-between;
           align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .ticket-folio {
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 12px;
+          font-weight: 600;
+          color: #FF4FA3;
+          white-space: nowrap;
+        }
+        .ticket-head-sub {
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+          flex-wrap: wrap;
+          font-family: 'IBM Plex Mono', monospace;
+          font-size: 11px;
+          color: var(--ink-dim);
           padding-bottom: 12px;
           border-bottom: 1px dashed var(--line);
           margin-bottom: 12px;
-          gap: 8px;
-          flex-wrap: wrap;
         }
         .business-name-input {
           background: transparent;
@@ -1385,19 +1552,79 @@ export default function CotizadorImpresion3D() {
 
       <div className="grid">
         <div>
-          <input
-            className="job-name"
-            placeholder="Nombre del pedido o cliente (opcional)"
-            value={order.orderName}
-            onChange={(e) => updateOrderName(e.target.value)}
-          />
+          <div className="client-block">
+            <input
+              className="job-name"
+              placeholder="Nombre del cliente / A la atención de"
+              value={order.clientName}
+              onChange={(e) => updateClientName(e.target.value)}
+            />
+            <div className="client-row">
+              <input
+                className="job-name job-name-secondary"
+                placeholder="Ciudad / dirección del cliente (opcional)"
+                value={order.clientLocation}
+                onChange={(e) => updateClientLocation(e.target.value)}
+              />
+              <div className="field-input-wrap discount-input">
+                <input
+                  type="number"
+                  className="field-input"
+                  min={0}
+                  step={10}
+                  value={order.discount}
+                  onChange={(e) => updateDiscount(e.target.value === "" ? 0 : Number(e.target.value))}
+                />
+                <span className="field-suffix">desc. {rates.currency}</span>
+              </div>
+            </div>
+          </div>
 
           <Section
             index={1}
-            title="Impresoras"
-            subtitle="Consumo eléctrico y depreciación de cada máquina"
+            title="Empresa"
+            subtitle="Nombre, dirección, folio e IVA para tus cotizaciones"
             open={openSection === 1}
             onToggle={() => setOpenSection(openSection === 1 ? 0 : 1)}
+            bodyClassName="grid2"
+          >
+            <label className="field">
+              <span className="field-label">Nombre de la empresa</span>
+              <div className="field-input-wrap">
+                <TextField value={rates.businessName} onChange={(v) => updateRate("businessName", v)} placeholder="Ej. 3D Maker" />
+              </div>
+            </label>
+            <label className="field">
+              <span className="field-label">Dirección</span>
+              <div className="field-input-wrap">
+                <TextField value={rates.companyAddress} onChange={(v) => updateRate("companyAddress", v)} placeholder="Ciudad, estado" />
+              </div>
+            </label>
+            <label className="field">
+              <span className="field-label">Prefijo de folio</span>
+              <div className="field-input-wrap">
+                <TextField value={rates.folioPrefix} onChange={(v) => updateRate("folioPrefix", v)} placeholder="COT" />
+              </div>
+            </label>
+            <NumField label="Siguiente número de folio" value={rates.nextFolioNumber} onChange={(v) => updateRate("nextFolioNumber", v)} step={1} min={1} />
+            <div className="margin-mode-row">
+              <span className="margin-mode-hint">Agrega IVA como una línea aparte en el ticket y el PDF.</span>
+              <div className="margin-mode-toggle">
+                <button className={!rates.ivaEnabled ? "active" : ""} onClick={() => updateRate("ivaEnabled", false)}>Sin IVA</button>
+                <button className={rates.ivaEnabled ? "active" : ""} onClick={() => updateRate("ivaEnabled", true)}>Con IVA</button>
+              </div>
+            </div>
+            {rates.ivaEnabled && (
+              <NumField label="% de IVA" value={rates.ivaPercent} onChange={(v) => updateRate("ivaPercent", v)} suffix="%" step={1} />
+            )}
+          </Section>
+
+          <Section
+            index={2}
+            title="Impresoras"
+            subtitle="Consumo eléctrico y depreciación de cada máquina"
+            open={openSection === 2}
+            onToggle={() => setOpenSection(openSection === 2 ? 0 : 2)}
           >
             {rates.printers.map((p) => (
               <PrinterCard
@@ -1415,11 +1642,11 @@ export default function CotizadorImpresion3D() {
           </Section>
 
           <Section
-            index={2}
+            index={3}
             title="Material"
             subtitle="Tipos de filamento y su precio por kg"
-            open={openSection === 2}
-            onToggle={() => setOpenSection(openSection === 2 ? 0 : 2)}
+            open={openSection === 3}
+            onToggle={() => setOpenSection(openSection === 3 ? 0 : 3)}
           >
             <NumField
               label="Desperdicio / fallas"
@@ -1447,11 +1674,11 @@ export default function CotizadorImpresion3D() {
           </Section>
 
           <Section
-            index={3}
+            index={4}
             title="Tarifas generales"
             subtitle="Electricidad, mantenimiento, mano de obra y margen"
-            open={openSection === 3}
-            onToggle={() => setOpenSection(openSection === 3 ? 0 : 3)}
+            open={openSection === 4}
+            onToggle={() => setOpenSection(openSection === 4 ? 0 : 4)}
             bodyClassName="grid2"
           >
             <NumField label="Costo de electricidad" value={rates.electricityCostPerKwh} onChange={(v) => updateRate("electricityCostPerKwh", v)} suffix={`${rates.currency}/kWh`} step={0.1} />
@@ -1472,11 +1699,11 @@ export default function CotizadorImpresion3D() {
           </Section>
 
           <Section
-            index={4}
+            index={5}
             title="Piezas del pedido"
             subtitle={`${order.components.length} ${order.components.length === 1 ? "componente" : "componentes"} a imprimir por separado`}
-            open={openSection === 4}
-            onToggle={() => setOpenSection(openSection === 4 ? 0 : 4)}
+            open={openSection === 5}
+            onToggle={() => setOpenSection(openSection === 5 ? 0 : 5)}
           >
             {order.components.map((c, i) => (
               <ComponentCard
@@ -1497,11 +1724,11 @@ export default function CotizadorImpresion3D() {
           </Section>
 
           <Section
-            index={5}
+            index={6}
             title="Post-proceso y acabados"
             subtitle="Costos generales del pedido: pegamento, espuma, empaque, accesorios..."
-            open={openSection === 5}
-            onToggle={() => setOpenSection(openSection === 5 ? 0 : 5)}
+            open={openSection === 6}
+            onToggle={() => setOpenSection(openSection === 6 ? 0 : 5)}
           >
             {orderExtras.length === 0 && (
               <p className="empty-hint">
@@ -1537,6 +1764,10 @@ export default function CotizadorImpresion3D() {
                 placeholder="Nombre de tu negocio"
                 onChange={(e) => updateRate("businessName", e.target.value)}
               />
+              <span className="ticket-folio">{folioPreview}</span>
+            </div>
+            <div className="ticket-head-sub">
+              <span>{order.clientLocation || (rates.companyAddress ? rates.companyAddress : "")}</span>
               <span>{round2(totals.weight)} g · {fmtHM(totals.printHours)}</span>
             </div>
 
@@ -1544,8 +1775,15 @@ export default function CotizadorImpresion3D() {
               {results.map((r) => (
                 <div className="ticket-piece-row" key={r.component.id}>
                   <span>
-                    <span className="ticket-piece-name">{r.component.name || "Pieza"}</span>
-                    <span className="ticket-piece-sub">{r.calc.printer.name} · {r.calc.material.name} · {round2(r.calc.weight)} g · {fmtHM(r.calc.printHours)}</span>
+                    <span className="ticket-piece-name">
+                      {r.component.name || "Pieza"}
+                      {r.calc.qty > 1 ? ` ×${r.calc.qty}` : ""}
+                    </span>
+                    <span className="ticket-piece-sub">
+                      {r.calc.printer.name} · {r.calc.material.name}
+                      {r.component.color ? ` · ${r.component.color}` : ""} · {round2(r.calc.weight)} g · {fmtHM(r.calc.printHours)}
+                      {r.calc.qty > 1 ? ` · ${fmtMoney(r.calc.unitPrice, rates.currency)} c/u` : ""}
+                    </span>
                   </span>
                   <span className="ticket-piece-value">{fmtMoney(r.calc.total, rates.currency)}</span>
                 </div>
@@ -1566,10 +1804,14 @@ export default function CotizadorImpresion3D() {
             <LineRow label="Subtotal (costo)" value={totals.subtotal} currency={rates.currency} />
             <LineRow label={`Ganancia (${round2(effectiveMarginOnSale)}% del precio)`} value={totals.profit} currency={rates.currency} />
             <div className="ticket-divider" />
+            <LineRow label="Subtotal" value={totals.total} currency={rates.currency} strong />
+            {discountAmount > 0 && <LineRow label="Descuento" value={-discountAmount} currency={rates.currency} />}
+            {rates.ivaEnabled && <LineRow label={`IVA (${n(rates.ivaPercent)}%)`} value={ivaAmount} currency={rates.currency} />}
+            <div className="ticket-divider" />
 
             <div className="ticket-total">
               <span className="ticket-total-label">Precio final</span>
-              <span className="ticket-total-value">{fmtMoney(totals.total, rates.currency)}</span>
+              <span className="ticket-total-value">{fmtMoney(finalTotal, rates.currency)}</span>
             </div>
 
             <div className="ticket-sub">
@@ -1618,11 +1860,18 @@ export default function CotizadorImpresion3D() {
     </div>
     <PrintableQuote
       businessName={rates.businessName}
-      orderName={order.orderName}
+      companyAddress={rates.companyAddress}
+      folio={order.folio || folioPreview}
+      clientName={order.clientName}
+      clientLocation={order.clientLocation}
       results={results}
-      orderExtrasSubtotal={orderExtrasSubtotal}
-      orderExtrasClientPrice={orderExtrasClientPrice}
-      total={totals.total}
+      orderExtras={extrasForPrint}
+      subtotal={totals.total}
+      discountAmount={discountAmount}
+      ivaEnabled={rates.ivaEnabled}
+      ivaPercent={n(rates.ivaPercent)}
+      ivaAmount={ivaAmount}
+      total={finalTotal}
       currency={rates.currency}
     />
     <FeedbackWidget />
