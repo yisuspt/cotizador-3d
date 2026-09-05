@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { Save, Copy, Trash2, RotateCcw, Check, ChevronDown, ChevronUp, Layers, Plus, Zap, Printer, Loader2 } from "lucide-react";
+import { Save, Copy, Trash2, RotateCcw, Check, ChevronDown, ChevronUp, Layers, Plus, Zap, Printer, Loader2, MessageSquarePlus } from "lucide-react";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import { storage } from "./storage";
@@ -18,6 +18,12 @@ const DEFAULT_MATERIALS = [
   { id: "abs-cf", name: "ABS-CF", pricePerKg: 800 },
   { id: "petg-cf", name: "PETG-CF", pricePerKg: 820 },
 ];
+
+// Configura tu propio endpoint de Formspree (gratis en https://formspree.io):
+// crea una cuenta, crea un formulario nuevo, y pega aquí la URL que te den
+// (algo como "https://formspree.io/f/xxxxabcd"). Mientras diga "TU-FORM-ID",
+// el botón de sugerencias avisa que falta configurarlo.
+const FEEDBACK_ENDPOINT = "https://formspree.io/f/mzebabjb";
 
 const DEFAULT_RATES = {
   currency: "MXN",
@@ -438,6 +444,176 @@ function PrintableQuote({ businessName, orderName, results, orderExtrasSubtotal,
 
       <div className="pq-footer">Cotización generada el {today}.</div>
     </div>
+  );
+}
+
+function FeedbackWidget() {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [message, setMessage] = useState("");
+  const [status, setStatus] = useState("idle"); // idle | sending | sent | error
+
+  const notConfigured = FEEDBACK_ENDPOINT.includes("TU-FORM-ID");
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!message.trim() || notConfigured) return;
+    setStatus("sending");
+    try {
+      const res = await fetch(FEEDBACK_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ name: name || "Anónimo", message, origen: "Cotizador 3D - beta" }),
+      });
+      if (res.ok) {
+        setStatus("sent");
+        setMessage("");
+        setName("");
+        setTimeout(() => {
+          setStatus("idle");
+          setOpen(false);
+        }, 1800);
+      } else {
+        setStatus("error");
+      }
+    } catch {
+      setStatus("error");
+    }
+  };
+
+  return (
+    <>
+      <button className="feedback-fab" onClick={() => setOpen(true)} aria-label="Enviar sugerencia">
+        <MessageSquarePlus size={18} />
+      </button>
+
+      {open && (
+        <div className="feedback-overlay" onClick={() => setOpen(false)}>
+          <div className="feedback-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="feedback-modal-head">
+              <span>Sugerencias — versión beta</span>
+              <button className="feedback-close" onClick={() => setOpen(false)} aria-label="Cerrar">×</button>
+            </div>
+
+            {notConfigured && (
+              <p className="feedback-hint">
+                Este formulario todavía no está conectado. Configura FEEDBACK_ENDPOINT en el código con tu URL de Formspree.
+              </p>
+            )}
+
+            {status === "sent" ? (
+              <p className="feedback-sent">¡Gracias! Tu sugerencia fue enviada.</p>
+            ) : (
+              <form onSubmit={handleSubmit}>
+                <input
+                  className="feedback-input"
+                  type="text"
+                  placeholder="Tu nombre (opcional)"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+                <textarea
+                  className="feedback-textarea"
+                  placeholder="¿Qué mejorarías, qué falló, qué te gustaría que tuviera?"
+                  rows={4}
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                />
+                {status === "error" && <p className="feedback-error">No se pudo enviar. Intenta de nuevo.</p>}
+                <button className="feedback-submit" type="submit" disabled={status === "sending" || notConfigured || !message.trim()}>
+                  {status === "sending" ? "Enviando…" : "Enviar sugerencia"}
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      <style>{`
+        .feedback-fab {
+          position: fixed;
+          bottom: 20px;
+          right: 20px;
+          z-index: 40;
+          width: 52px;
+          height: 52px;
+          border-radius: 50%;
+          background: #FF7A3D;
+          color: #1A1206;
+          border: none;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+        }
+        .feedback-fab:hover { background: #ff8a54; }
+        @media print { .feedback-fab { display: none !important; } }
+
+        .feedback-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(0,0,0,0.55);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 50;
+          padding: 16px;
+        }
+        @media print { .feedback-overlay { display: none !important; } }
+        .feedback-modal {
+          background: #1D2023;
+          border: 1px solid #33373C;
+          border-radius: 14px;
+          padding: 20px;
+          width: 100%;
+          max-width: 380px;
+          color: #EDEAE2;
+          font-family: 'IBM Plex Sans', sans-serif;
+        }
+        .feedback-modal-head {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          font-family: 'Space Grotesk', sans-serif;
+          font-weight: 600;
+          font-size: 15px;
+          margin-bottom: 12px;
+        }
+        .feedback-close { background: transparent; border: none; color: #93968F; font-size: 20px; line-height: 1; cursor: pointer; }
+        .feedback-close:hover { color: #EDEAE2; }
+        .feedback-hint { font-size: 12px; color: #93968F; margin-bottom: 10px; line-height: 1.5; }
+        .feedback-input, .feedback-textarea {
+          width: 100%;
+          background: #23262A;
+          border: 1px solid #33373C;
+          border-radius: 8px;
+          color: #EDEAE2;
+          font-family: 'IBM Plex Sans', sans-serif;
+          font-size: 13.5px;
+          padding: 9px 10px;
+          margin-bottom: 10px;
+          resize: vertical;
+        }
+        .feedback-input:focus, .feedback-textarea:focus { outline: none; border-color: #7A4025; }
+        .feedback-submit {
+          width: 100%;
+          background: #FF7A3D;
+          color: #1A1206;
+          border: none;
+          font-family: 'IBM Plex Sans', sans-serif;
+          font-size: 13.5px;
+          font-weight: 500;
+          padding: 10px;
+          border-radius: 9px;
+          cursor: pointer;
+        }
+        .feedback-submit:hover { background: #ff8a54; }
+        .feedback-submit:disabled { opacity: 0.5; cursor: default; }
+        .feedback-error { color: #e5484d; font-size: 12px; margin: -4px 0 10px; }
+        .feedback-sent { font-size: 14px; color: #4FD1B8; text-align: center; padding: 20px 0; }
+      `}</style>
+    </>
   );
 }
 
@@ -1449,6 +1625,7 @@ export default function CotizadorImpresion3D() {
       total={totals.total}
       currency={rates.currency}
     />
+    <FeedbackWidget />
     </>
   );
 }
