@@ -553,13 +553,8 @@ function ComponentCard({ component, index, printers, materials, currency, onChan
       </div>
 
       <div className="piece-fields-tech">
-        <div className="field">
-          <div className="quantity-row">
-            <span className="field-label">Cantidad</span>
-            <button type="button" className="split-toggle" onClick={() => setShowSplit((s) => !s)}>
-              <Scissors size={11} /> Desglosar por unidad
-            </button>
-          </div>
+        <div className="field qty-field">
+          <span className="field-label">Cantidad</span>
           <div className="field-input-wrap">
             <input
               type="number"
@@ -571,6 +566,9 @@ function ComponentCard({ component, index, printers, materials, currency, onChan
             />
           </div>
           <span className="field-hint">Piezas idénticas en este renglón</span>
+          <button type="button" className="split-toggle" onClick={() => setShowSplit((s) => !s)} title="Convertir un total de placa en peso/tiempo por unidad">
+            <Scissors size={11} /> Desglosar
+          </button>
           {showSplit && (
             <div className="split-box">
               <span className="split-box-label">Este peso/tiempo es el total de la placa. ¿En cuántas piezas idénticas lo divido?</span>
@@ -1708,10 +1706,9 @@ export default function CotizadorImpresion3D() {
         .gcode-upload-btn:hover { border-color: var(--teal); }
         .gcode-msg { font-size: 11px; color: var(--ink-dim); line-height: 1.5; margin: 0 0 12px; }
 
-        .quantity-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 6px; }
-        .quantity-row .field-label { margin: 0; }
+        .qty-field { position: relative; z-index: 1; }
         .split-toggle {
-          display: flex;
+          display: inline-flex;
           align-items: center;
           gap: 4px;
           background: transparent;
