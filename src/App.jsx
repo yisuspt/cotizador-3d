@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { Save, Copy, Trash2, RotateCcw, Check, ChevronDown, ChevronUp, Layers, Plus, Zap, Printer, Loader2, MessageSquarePlus } from "lucide-react";
+import { Save, Copy, Trash2, RotateCcw, Check, ChevronDown, ChevronUp, Layers, Plus, Zap, Printer, Loader2, MessageSquarePlus, Upload, Scissors } from "lucide-react";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import { storage } from "./storage";
@@ -103,6 +103,85 @@ function resizeImageToDataUrl(file, maxWidth = 320) {
     };
     reader.readAsDataURL(file);
   });
+}
+
+// ---- Lectura de archivos .gcode ----
+// Los slicers escriben el resumen de la impresión (peso de filamento, tiempo,
+// altura de capa, relleno) como comentarios de texto, casi siempre al inicio
+// o al final del archivo. Para no cargar en memoria archivos gigantes, solo
+// leemos los primeros y últimos ~64 KB.
+async function readGcodeHeadTail(file, chunkSize = 65536) {
+  if (file.size <= chunkSize * 2) {
+    return await file.text();
+  }
+  const head = await file.slice(0, chunkSize).text();
+  const tail = await file.slice(file.size - chunkSize, file.size).text();
+  return `${head}\n${tail}`;
+}
+
+function parseDurationToHours(str) {
+  if (!str) return null;
+  const re = /(\d+(?:\.\d+)?)\s*(d|h|m|s)\b/gi;
+  let match;
+  let totalSeconds = 0;
+  let found = false;
+  while ((match = re.exec(str))) {
+    found = true;
+    const val = parseFloat(match[1]);
+    const unit = match[2].toLowerCase();
+    if (unit === "d") totalSeconds += val * 86400;
+    else if (unit === "h") totalSeconds += val * 3600;
+    else if (unit === "m") totalSeconds += val * 60;
+    else if (unit === "s") totalSeconds += val;
+  }
+  return found ? totalSeconds / 3600 : null;
+}
+
+function parseGcodeText(text) {
+  const result = { weightG: null, weightEstimated: false, timeHours: null, layerHeightMm: null, infillPercent: null, materialType: null };
+
+  const weightMatch =
+    text.match(/;\s*filament used \[g\]\s*=\s*([\d.]+)/i) ||
+    text.match(/;\s*total filament weight \[g\]\s*[:=]\s*([\d.]+)/i) ||
+    text.match(/;\s*filament_weight_total\s*=\s*([\d.]+)/i) ||
+    text.match(/;\s*Filament weight\s*[:=]\s*([\d.]+)/i);
+  if (weightMatch) {
+    result.weightG = parseFloat(weightMatch[1]);
+  } else {
+    const lengthMatch = text.match(/;\s*Filament used:\s*([\d.]+)\s*m\b/i);
+    if (lengthMatch) {
+      const meters = parseFloat(lengthMatch[1]);
+      const radiusCm = 0.175 / 2;
+      const volumeCm3 = Math.PI * radiusCm * radiusCm * (meters * 100);
+      result.weightG = Math.round(volumeCm3 * 1.24 * 10) / 10;
+      result.weightEstimated = true;
+    }
+  }
+
+  const timeMatch =
+    text.match(/;\s*estimated printing time \(normal mode\)\s*=\s*([^\n\r]+)/i) ||
+    text.match(/;\s*estimated printing time\s*=\s*([^\n\r]+)/i) ||
+    text.match(/;\s*total estimated time\s*:?\s*([^\n\r]+)/i) ||
+    text.match(/;\s*model printing time:\s*([^\n\r,]+)/i);
+  if (timeMatch) {
+    const hrs = parseDurationToHours(timeMatch[1]);
+    if (hrs !== null) result.timeHours = hrs;
+  }
+  if (result.timeHours === null) {
+    const secondsMatch = text.match(/;TIME:\s*(\d+)/i);
+    if (secondsMatch) result.timeHours = parseFloat(secondsMatch[1]) / 3600;
+  }
+
+  const layerMatch = text.match(/;\s*layer_height\s*=\s*([\d.]+)/i) || text.match(/;\s*Layer height:\s*([\d.]+)/i);
+  if (layerMatch) result.layerHeightMm = parseFloat(layerMatch[1]);
+
+  const infillMatch = text.match(/;\s*fill_density\s*=\s*([\d.]+)\s*%?/i);
+  if (infillMatch) result.infillPercent = parseFloat(infillMatch[1]);
+
+  const materialMatch = text.match(/;\s*filament_type\s*=\s*([A-Za-z0-9\-]+)/i);
+  if (materialMatch) result.materialType = materialMatch[1].toUpperCase();
+
+  return result;
 }
 
 function makeDefaultComponent(printerId, materialId, index) {
@@ -342,6 +421,84 @@ function ExtraItemRow({ item, currency, onChange, onRemove, canRemove }) {
 function ComponentCard({ component, index, printers, materials, currency, onChange, onRemove, canRemove }) {
   const printer = printers.find((p) => p.id === component.printerId) || printers[0];
   const material = materials.find((m) => m.id === component.materialId) || materials[0];
+  const [gcodeMsg, setGcodeMsg] = useState("");
+  const [gcodeBusy, setGcodeBusy] = useState(false);
+  const [showSplit, setShowSplit] = useState(false);
+  const [splitCount, setSplitCount] = useState(2);
+
+  const handleGcodeFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setGcodeBusy(true);
+    setGcodeMsg("");
+    try {
+      const text = await readGcodeHeadTail(file);
+      const parsed = parseGcodeText(text);
+      const updates = {};
+      const found = [];
+      const missing = [];
+
+      if (parsed.weightG !== null) {
+        updates.weightGrams = Math.round(parsed.weightG * 10) / 10;
+        found.push(`peso ${updates.weightGrams} g${parsed.weightEstimated ? " (estimado)" : ""}`);
+      } else missing.push("peso");
+
+      if (parsed.timeHours !== null) {
+        updates.printHours = Math.round(parsed.timeHours * 100) / 100;
+        found.push(`tiempo ${fmtHM(parsed.timeHours)}`);
+      } else missing.push("tiempo");
+
+      if (parsed.layerHeightMm !== null) {
+        updates.layerHeight = parsed.layerHeightMm;
+        found.push(`capa ${parsed.layerHeightMm}mm`);
+      } else missing.push("altura de capa");
+
+      if (parsed.infillPercent !== null) {
+        updates.infillPercent = parsed.infillPercent;
+        found.push(`relleno ${parsed.infillPercent}%`);
+      } else missing.push("relleno");
+
+      if (parsed.materialType) {
+        const matchedMaterial = materials.find((m) => m.name.toUpperCase().includes(parsed.materialType) || parsed.materialType.includes(m.name.toUpperCase()));
+        if (matchedMaterial) {
+          updates.materialId = matchedMaterial.id;
+          found.push(`material ${matchedMaterial.name}`);
+        } else {
+          missing.push(`material (detectamos "${parsed.materialType}", no está en tu lista — selecciónalo o agrégalo)`);
+        }
+      } else missing.push("material");
+
+      if (!component.name) {
+        updates.name = file.name.replace(/\.gcode$/i, "");
+      }
+
+      onChange({ ...component, ...updates });
+
+      const parts = [];
+      if (found.length) parts.push(`Detectado: ${found.join(", ")}.`);
+      if (missing.length) parts.push(`No se detectó: ${missing.join(", ")} — revísalo a mano.`);
+      setGcodeMsg(parts.join(" ") || "No se pudo detectar información en este archivo.");
+    } catch {
+      setGcodeMsg("No se pudo leer el archivo. ¿Es un .gcode válido?");
+    } finally {
+      setGcodeBusy(false);
+    }
+  };
+
+  const applySplit = () => {
+    const count = Math.max(1, Math.round(n(splitCount) || 1));
+    const currentWeight = n(component.weightGrams);
+    const currentHours = n(component.printHours);
+    onChange({
+      ...component,
+      quantity: count,
+      weightGrams: Math.round((currentWeight / count) * 100) / 100,
+      printHours: Math.round((currentHours / count) * 1000) / 1000,
+    });
+    setShowSplit(false);
+  };
+
   return (
     <div className="piece-card">
       <div className="piece-card-head">
@@ -358,6 +515,13 @@ function ComponentCard({ component, index, printers, materials, currency, onChan
           </button>
         )}
       </div>
+
+      <label className="gcode-upload-btn">
+        {gcodeBusy ? <Loader2 size={13} className="spin" /> : <Upload size={13} />}
+        {gcodeBusy ? "Leyendo…" : "Cargar .gcode (opcional)"}
+        <input type="file" accept=".gcode,.gco,.g" onChange={handleGcodeFile} hidden disabled={gcodeBusy} />
+      </label>
+      {gcodeMsg && <p className="gcode-msg">{gcodeMsg}</p>}
 
       <span className="chip-row-label">Impresora</span>
       <div className="printer-chips">
@@ -389,7 +553,44 @@ function ComponentCard({ component, index, printers, materials, currency, onChan
       </div>
 
       <div className="piece-fields-tech">
-        <NumField label="Cantidad" value={component.quantity} onChange={(v) => onChange({ ...component, quantity: v })} min={1} step={1} hint="Piezas idénticas en este renglón" />
+        <div className="field">
+          <div className="quantity-row">
+            <span className="field-label">Cantidad</span>
+            <button type="button" className="split-toggle" onClick={() => setShowSplit((s) => !s)}>
+              <Scissors size={11} /> Desglosar por unidad
+            </button>
+          </div>
+          <div className="field-input-wrap">
+            <input
+              type="number"
+              className="field-input"
+              min={1}
+              step={1}
+              value={component.quantity}
+              onChange={(e) => onChange({ ...component, quantity: e.target.value === "" ? 1 : Number(e.target.value) })}
+            />
+          </div>
+          <span className="field-hint">Piezas idénticas en este renglón</span>
+          {showSplit && (
+            <div className="split-box">
+              <span className="split-box-label">Este peso/tiempo es el total de la placa. ¿En cuántas piezas idénticas lo divido?</span>
+              <div className="split-box-row">
+                <div className="field-input-wrap split-input">
+                  <input
+                    type="number"
+                    className="field-input"
+                    min={1}
+                    step={1}
+                    value={splitCount}
+                    onChange={(e) => setSplitCount(e.target.value === "" ? 1 : Number(e.target.value))}
+                  />
+                </div>
+                <button type="button" className="split-apply" onClick={applySplit}>Aplicar</button>
+                <button type="button" className="split-cancel" onClick={() => setShowSplit(false)}>Cancelar</button>
+              </div>
+            </div>
+          )}
+        </div>
         <label className="field">
           <span className="field-label">Color</span>
           <div className="field-input-wrap">
@@ -800,7 +1001,7 @@ function FeedbackWidget() {
 export default function CotizadorImpresion3D() {
   const [rates, setRates] = useState(DEFAULT_RATES);
   const [order, setOrder] = useState(DEFAULT_ORDER);
-  const [openSection, setOpenSection] = useState(4);
+  const [openSection, setOpenSection] = useState(5);
   const [history, setHistory] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -1484,11 +1685,65 @@ export default function CotizadorImpresion3D() {
         @media (max-width: 380px) {
           .piece-fields { grid-template-columns: 1fr; }
         }
-        .piece-fields-tech { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 16px; margin-bottom: 12px; }
+        .piece-fields-tech { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 16px; margin-bottom: 12px; align-items: start; }
         @media (max-width: 560px) {
           .piece-fields-tech { grid-template-columns: 1fr 1fr; }
         }
         .piece-printer-note { font-size: 11px; color: var(--ink-dim); margin-top: 8px; opacity: 0.8; }
+
+        .gcode-upload-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          background: var(--panel);
+          border: 1px dashed var(--teal-dim);
+          color: var(--teal);
+          font-family: 'IBM Plex Sans', sans-serif;
+          font-size: 12px;
+          padding: 7px 11px;
+          border-radius: 8px;
+          cursor: pointer;
+          margin-bottom: 8px;
+        }
+        .gcode-upload-btn:hover { border-color: var(--teal); }
+        .gcode-msg { font-size: 11px; color: var(--ink-dim); line-height: 1.5; margin: 0 0 12px; }
+
+        .quantity-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 6px; }
+        .quantity-row .field-label { margin: 0; }
+        .split-toggle {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          background: transparent;
+          border: none;
+          color: var(--teal);
+          font-size: 10.5px;
+          cursor: pointer;
+          padding: 0;
+          white-space: nowrap;
+        }
+        .split-toggle:hover { text-decoration: underline; }
+        .split-box {
+          background: var(--panel);
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          padding: 10px;
+          margin-top: 8px;
+        }
+        .split-box-label { font-size: 11px; color: var(--ink-dim); line-height: 1.4; display: block; margin-bottom: 8px; }
+        .split-box-row { display: flex; gap: 6px; }
+        .split-input { width: 60px; flex-shrink: 0; }
+        .split-apply, .split-cancel {
+          font-family: 'IBM Plex Sans', sans-serif;
+          font-size: 11.5px;
+          padding: 7px 10px;
+          border-radius: 7px;
+          cursor: pointer;
+          border: 1px solid transparent;
+        }
+        .split-apply { background: var(--accent); color: #1A1206; }
+        .split-apply:hover { background: #ff8a54; }
+        .split-cancel { background: transparent; border-color: var(--line); color: var(--ink-dim); }
 
         .add-piece-btn {
           width: 100%;
