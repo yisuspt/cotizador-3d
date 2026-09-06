@@ -1909,7 +1909,7 @@ export default function CotizadorImpresion3D() {
             title="Post-proceso y acabados"
             subtitle="Costos generales del pedido: pegamento, espuma, empaque, accesorios..."
             open={openSection === 6}
-            onToggle={() => setOpenSection(openSection === 6 ? 0 : 5)}
+            onToggle={() => setOpenSection(openSection === 6 ? 0 : 6)}
           >
             {orderExtras.length === 0 && (
               <p className="empty-hint">
