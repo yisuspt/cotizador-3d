@@ -19,6 +19,38 @@ const DEFAULT_MATERIALS = [
   { id: "petg-cf", name: "PETG-CF", pricePerKg: 820 },
 ];
 
+// Catálogo de referencia para el selector "Agregar de catálogo". Los precios
+// están en USD de lista (sin envío ni impuestos de importación) y el consumo
+// es un PROMEDIO estimado durante la impresión (no la capacidad máxima de la
+// fuente de poder) — ambos son puntos de partida editables, no cifras exactas
+// para tu caso. Vida útil también es una estimación general por gama.
+const PRINTER_CATALOG = [
+  { brand: "Bambu Lab", name: "A1 mini", watts: 70, price: 199, lifespanHours: 5000 },
+  { brand: "Bambu Lab", name: "A1", watts: 90, price: 299, lifespanHours: 5000 },
+  { brand: "Bambu Lab", name: "A2L", watts: 100, price: 469, lifespanHours: 5000 },
+  { brand: "Bambu Lab", name: "P1S", watts: 100, price: 399, lifespanHours: 5500 },
+  { brand: "Bambu Lab", name: "P2S", watts: 110, price: 549, lifespanHours: 6000 },
+  { brand: "Bambu Lab", name: "X2D", watts: 130, price: 649, lifespanHours: 6000 },
+  { brand: "Bambu Lab", name: "H2S", watts: 190, price: 1249, lifespanHours: 6000 },
+  { brand: "Bambu Lab", name: "H2D", watts: 200, price: 1749, lifespanHours: 6000 },
+  { brand: "Bambu Lab", name: "H2C", watts: 220, price: 2399, lifespanHours: 6000 },
+  { brand: "Prusa", name: "MINI+", watts: 80, price: 409, lifespanHours: 6000 },
+  { brand: "Prusa", name: "MK4S", watts: 95, price: 999, lifespanHours: 7000 },
+  { brand: "Prusa", name: "CORE One", watts: 120, price: 1199, lifespanHours: 7000 },
+  { brand: "Prusa", name: "XL (1 extrusor)", watts: 200, price: 2499, lifespanHours: 7000 },
+  { brand: "Creality", name: "Ender 3 V3 SE", watts: 150, price: 169, lifespanHours: 3000 },
+  { brand: "Creality", name: "Ender 3 V3 KE", watts: 180, price: 279, lifespanHours: 3500 },
+  { brand: "Creality", name: "K1", watts: 160, price: 499, lifespanHours: 4000 },
+  { brand: "Creality", name: "K1C", watts: 200, price: 559, lifespanHours: 4500 },
+  { brand: "Creality", name: "K1 Max", watts: 250, price: 699, lifespanHours: 4500 },
+  { brand: "Anycubic", name: "Kobra 2", watts: 140, price: 259, lifespanHours: 3500 },
+  { brand: "Anycubic", name: "Kobra 3", watts: 200, price: 399, lifespanHours: 4000 },
+  { brand: "Elegoo", name: "Neptune 4", watts: 160, price: 259, lifespanHours: 3500 },
+  { brand: "Elegoo", name: "Neptune 4 Pro", watts: 200, price: 329, lifespanHours: 4000 },
+  { brand: "Voron", name: "Voron 0.2", watts: 60, price: 350, lifespanHours: 6000 },
+  { brand: "Voron", name: "Voron 2.4 (350×350)", watts: 250, price: 900, lifespanHours: 6500 },
+];
+
 // Configura tu propio endpoint de Formspree (gratis en https://formspree.io):
 // crea una cuenta, crea un formulario nuevo, y pega aquí la URL que te den
 // (algo como "https://formspree.io/f/xxxxabcd"). Mientras diga "TU-FORM-ID",
@@ -29,6 +61,7 @@ const DEFAULT_RATES = {
   currency: "MXN",
   businessName: "",
   companyAddress: "",
+  logoDataUrl: "",
   folioPrefix: "COT",
   nextFolioNumber: 1001,
   ivaEnabled: false,
@@ -45,6 +78,31 @@ const DEFAULT_RATES = {
 
 function newId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// Redimensiona y comprime una imagen subida por el usuario antes de
+// guardarla como base64, para no saturar el almacenamiento local del
+// navegador (localStorage tiene un límite de unos pocos MB por sitio).
+function resizeImageToDataUrl(file, maxWidth = 320) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("No se pudo leer el archivo"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("No se pudo procesar la imagen"));
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function makeDefaultComponent(printerId, materialId, index) {
@@ -402,6 +460,7 @@ function computeComponent(component, rates) {
 function PrintableQuote({
   businessName,
   companyAddress,
+  logoDataUrl,
   folio,
   clientName,
   clientLocation,
@@ -446,6 +505,8 @@ function PrintableQuote({
         }
         .pq-topbar { height: 6px; background: #1a3aa8; margin: 0 -4mm 22px; }
         .pq-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
+        .pq-brand-row { display: flex; align-items: center; gap: 12px; }
+        .pq-logo { width: 48px; height: 48px; object-fit: contain; }
         .pq-business { font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 700; }
         .pq-address { font-size: 11.5px; color: #666; margin-top: 2px; }
         .pq-folio { font-family: 'IBM Plex Mono', monospace; font-size: 13px; font-weight: 700; color: #d6006e; }
@@ -472,9 +533,12 @@ function PrintableQuote({
       <div className="pq-topbar" />
 
       <div className="pq-header">
-        <div>
-          <div className="pq-business">{businessName || "Cotización"}</div>
-          {companyAddress && <div className="pq-address">{companyAddress}</div>}
+        <div className="pq-brand-row">
+          {logoDataUrl && <img src={logoDataUrl} alt="" className="pq-logo" />}
+          <div>
+            <div className="pq-business">{businessName || "Cotización"}</div>
+            {companyAddress && <div className="pq-address">{companyAddress}</div>}
+          </div>
         </div>
         <div className="pq-folio">{folio}</div>
       </div>
@@ -743,6 +807,7 @@ export default function CotizadorImpresion3D() {
   const [savedFlash, setSavedFlash] = useState(false);
   const [storageOk, setStorageOk] = useState(true);
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [logoError, setLogoError] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -789,6 +854,25 @@ export default function CotizadorImpresion3D() {
     persistRates(next);
   };
 
+  const handleLogoUpload = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setLogoError("Sube un archivo de imagen (PNG, JPG, etc.)");
+      return;
+    }
+    try {
+      const dataUrl = await resizeImageToDataUrl(file, 320);
+      setLogoError("");
+      updateRate("logoDataUrl", dataUrl);
+    } catch {
+      setLogoError("No se pudo procesar la imagen. Intenta con otra.");
+    }
+  };
+
+  const handleRemoveLogo = () => updateRate("logoDataUrl", "");
+
   const updatePrinter = (printerId, updatedPrinter) => {
     const next = { ...rates, printers: rates.printers.map((p) => (p.id === printerId ? updatedPrinter : p)) };
     setRates(next);
@@ -799,6 +883,20 @@ export default function CotizadorImpresion3D() {
     const next = {
       ...rates,
       printers: [...rates.printers, { id: newId("p"), name: "Nueva impresora", watts: 150, price: 10000, lifespanHours: 5000 }],
+    };
+    setRates(next);
+    persistRates(next);
+  };
+
+  const addPrinterFromCatalog = (catalogIndex) => {
+    const preset = PRINTER_CATALOG[catalogIndex];
+    if (!preset) return;
+    const next = {
+      ...rates,
+      printers: [
+        ...rates.printers,
+        { id: newId("p"), name: `${preset.brand} ${preset.name}`, watts: preset.watts, price: preset.price, lifespanHours: preset.lifespanHours },
+      ],
     };
     setRates(next);
     persistRates(next);
@@ -1285,6 +1383,44 @@ export default function CotizadorImpresion3D() {
           margin-top: 2px;
         }
         .add-row-btn:hover { color: var(--ink); border-color: var(--accent-dim); }
+        .catalog-select {
+          width: 100%;
+          background: var(--panel-alt);
+          border: 1px solid var(--accent-dim);
+          color: var(--ink);
+          font-family: 'IBM Plex Sans', sans-serif;
+          font-size: 13px;
+          padding: 10px 12px;
+          border-radius: 10px;
+          cursor: pointer;
+          margin-bottom: 6px;
+        }
+        .catalog-select:focus { outline: none; border-color: var(--accent); }
+        .catalog-hint { display: block; font-size: 11px; color: var(--ink-dim); line-height: 1.5; margin-bottom: 10px; }
+        .logo-field { grid-column: 1 / -1; }
+        .logo-row { display: flex; align-items: center; gap: 10px; }
+        .logo-preview {
+          width: 44px;
+          height: 44px;
+          object-fit: contain;
+          background: var(--panel-alt);
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          padding: 4px;
+        }
+        .logo-upload-btn {
+          display: inline-flex;
+          align-items: center;
+          background: var(--panel-alt);
+          border: 1px solid var(--line);
+          color: var(--ink);
+          font-family: 'IBM Plex Sans', sans-serif;
+          font-size: 12.5px;
+          padding: 8px 12px;
+          border-radius: 8px;
+          cursor: pointer;
+        }
+        .logo-upload-btn:hover { border-color: var(--accent-dim); }
         .empty-hint { font-size: 12.5px; color: var(--ink-dim); line-height: 1.5; margin: 0 0 12px; }
 
         .piece-card {
@@ -1600,6 +1736,29 @@ export default function CotizadorImpresion3D() {
                 <TextField value={rates.companyAddress} onChange={(v) => updateRate("companyAddress", v)} placeholder="Ciudad, estado" />
               </div>
             </label>
+            <div className="field logo-field">
+              <span className="field-label">Logotipo</span>
+              <div className="logo-row">
+                {rates.logoDataUrl ? (
+                  <>
+                    <img src={rates.logoDataUrl} alt="Logotipo" className="logo-preview" />
+                    <label className="logo-upload-btn">
+                      Cambiar
+                      <input type="file" accept="image/*" onChange={handleLogoUpload} hidden />
+                    </label>
+                    <button type="button" className="piece-remove" onClick={handleRemoveLogo} aria-label="Quitar logotipo">
+                      <Trash2 size={14} />
+                    </button>
+                  </>
+                ) : (
+                  <label className="logo-upload-btn">
+                    Subir imagen
+                    <input type="file" accept="image/*" onChange={handleLogoUpload} hidden />
+                  </label>
+                )}
+              </div>
+              {logoError && <span className="feedback-error" style={{ margin: 0 }}>{logoError}</span>}
+            </div>
             <label className="field">
               <span className="field-label">Prefijo de folio</span>
               <div className="field-input-wrap">
@@ -1636,8 +1795,30 @@ export default function CotizadorImpresion3D() {
                 canRemove={rates.printers.length > 1}
               />
             ))}
+            <select
+              className="catalog-select"
+              value=""
+              onChange={(e) => {
+                if (e.target.value !== "") addPrinterFromCatalog(Number(e.target.value));
+                e.target.value = "";
+              }}
+            >
+              <option value="" disabled>+ Agregar de catálogo (precargada)…</option>
+              {Array.from(new Set(PRINTER_CATALOG.map((p) => p.brand))).map((brand) => (
+                <optgroup label={brand} key={brand}>
+                  {PRINTER_CATALOG.map((p, i) =>
+                    p.brand === brand ? (
+                      <option key={i} value={i}>
+                        {p.name} — {p.watts}W · ${p.price}
+                      </option>
+                    ) : null
+                  )}
+                </optgroup>
+              ))}
+            </select>
+            <span className="catalog-hint">Precio en USD de lista y consumo promedio estimado — ambos son punto de partida, edítalos con tus datos reales de compra.</span>
             <button type="button" className="add-row-btn" onClick={addPrinter}>
-              <Plus size={14} /> Agregar impresora
+              <Plus size={14} /> Agregar impresora en blanco
             </button>
           </Section>
 
@@ -1861,6 +2042,7 @@ export default function CotizadorImpresion3D() {
     <PrintableQuote
       businessName={rates.businessName}
       companyAddress={rates.companyAddress}
+      logoDataUrl={rates.logoDataUrl}
       folio={order.folio || folioPreview}
       clientName={order.clientName}
       clientLocation={order.clientLocation}
